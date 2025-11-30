@@ -10,13 +10,12 @@ import sys
 import random
 import itertools
 import time
-from datetime import datetime
 from urllib.parse import urlparse
 from colorama import Fore, Style, init
 from tqdm.asyncio import tqdm
 
 __author__ = "Saleh Al-Otaibi"
-__version__ = "4.0.0 (Turbo Edition)"
+__version__ = "5.0.0 (Elite Display)"
 __tool_name__ = "FuzzerPy"
 
 init(autoreset=True)
@@ -88,6 +87,8 @@ class FuzzerPyEngine:
         self.semaphore = asyncio.Semaphore(threads)
         self.output_file = output_file
         self.found_urls = []
+        self.stats = {200: 0, 403: 0, 301: 0, 302: 0, 'other': 0}
+        self.total_scanned = 0
         self.timeout_settings = aiohttp.ClientTimeout(total=5, sock_connect=3)
         
         if __author__ != "Saleh Al-Otaibi":
@@ -109,24 +110,57 @@ class FuzzerPyEngine:
             try:
                 async with session.get(url, headers=headers, allow_redirects=False, timeout=self.timeout_settings) as response:
                     status = response.status
+                    self.total_scanned += 1
+                    
+                    # Result Formatting
                     msg = ""
                     if status == 200:
-                        msg = f"{Fore.GREEN}[200] OK: {url}{Style.RESET_ALL}"
+                        msg = f"{Fore.GREEN}[✔] 200 OK      | {url}{Style.RESET_ALL}"
+                        self.stats[200] += 1
                     elif status == 403:
-                        msg = f"{Fore.YELLOW}[403] Forbidden: {url}{Style.RESET_ALL}"
+                        msg = f"{Fore.YELLOW}[!] 403 Forbidden | {url}{Style.RESET_ALL}"
+                        self.stats[403] += 1
                     elif status in [301, 302]:
                         loc = response.headers.get('Location', 'Unknown')
-                        msg = f"{Fore.BLUE}[{status}] Redirect: {url} -> {loc}{Style.RESET_ALL}"
-                    
+                        msg = f"{Fore.BLUE}[➜] {status} Redirect| {url} -> {loc}{Style.RESET_ALL}"
+                        self.stats[status] += 1
+                    else:
+                         # We don't print other codes to keep it simple, but track them
+                         pass
+
                     if msg:
+                        # Print CLEANLY above the progress bar
                         tqdm.write(msg)
                         self.found_urls.append(url)
                         self.save_result(f"[{status}] {url}")
+                        
+                        # Update the live counter on the bar
+                        pbar.set_postfix({'Found': f"{len(self.found_urls)}"}, refresh=True)
 
             except Exception:
                 pass
             finally:
                 pbar.update(1)
+
+    def print_summary(self, duration):
+        total_found = len(self.found_urls)
+        not_found = self.total_scanned - total_found
+        
+        print("\n" + Fore.WHITE + "=" * 50)
+        print(f"{Fore.CYAN}           SCAN REPORT SUMMARY")
+        print(Fore.WHITE + "=" * 50)
+        print(f"{Fore.WHITE} Time Taken   : {Fore.YELLOW}{duration:.2f} sec")
+        print(f"{Fore.WHITE} Total Scanned: {Fore.CYAN}{self.total_scanned:,}")
+        print(f"{Fore.WHITE} Not Found    : {Fore.RED}{not_found:,}")
+        print(f"{Fore.WHITE} Total Found  : {Fore.GREEN}{total_found:,}")
+        print(Fore.WHITE + "-" * 50)
+        print(f"{Fore.GREEN} [200] OK      : {self.stats[200]}")
+        print(f"{Fore.BLUE} [3xx] Redirect: {self.stats[301] + self.stats[302]}")
+        print(f"{Fore.YELLOW} [403] Forbidden: {self.stats[403]}")
+        print(Fore.WHITE + "=" * 50)
+        if self.output_file:
+            print(f"{Fore.WHITE} Results saved to: {Fore.MAGENTA}{self.output_file}")
+        print(f"{Fore.WHITE} Tool by: {Fore.RED}{__author__}")
 
     async def run(self):
         self.print_banner()
@@ -140,17 +174,19 @@ class FuzzerPyEngine:
                 final_payloads.append(f"{word}.{ext}")
 
         total = len(final_payloads)
-        print(f"{Fore.WHITE}[*] Total Requests: {Fore.GREEN}{total:,}")
-        print(f"{Fore.WHITE}[*] Speed/Threads: {Fore.GREEN}{self.semaphore._value}")
+        print(f"{Fore.WHITE}[*] Target: {Fore.GREEN}{self.target}")
+        print(f"{Fore.WHITE}[*] Speed: {Fore.GREEN}{self.semaphore._value} Threads")
         print("-" * 60)
         
         connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300, ssl=False)
-        
         start_time = time.time()
         
+        # Cleaner Bar Format
+        bar_fmt = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] {postfix}"
+        
         async with aiohttp.ClientSession(connector=connector) as session:
-            with tqdm(total=total, desc="Turbo Scan", unit="req", ncols=95, 
-                      bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]") as pbar:
+            with tqdm(total=total, desc=f"{Fore.CYAN}Scanning", unit="req", ncols=95, 
+                      bar_format=bar_fmt, postfix={'Found': '0'}) as pbar:
                 
                 tasks = []
                 for path in final_payloads:
@@ -159,10 +195,7 @@ class FuzzerPyEngine:
                 await asyncio.gather(*tasks)
 
         duration = time.time() - start_time
-        print("\n" + "=" * 60)
-        print(f"{Fore.GREEN}[✔] Scan Finished in {duration:.2f} seconds.")
-        print(f"{Fore.GREEN}[✔] Total Found: {len(self.found_urls)}")
-        print(f"{Fore.WHITE}[INFO] Developed by {__author__}")
+        self.print_summary(duration)
 
     def print_banner(self):
         print(Fore.RED + r"""
@@ -172,10 +205,10 @@ class FuzzerPyEngine:
  |  __| | | |_  /_  /_  / | '__||  ___/ | | |
  | |  | |_| |/ / / / / /| | |   | |   | |_| |
  |_|   \__,_/___/___/___|_|_|   |_|    \__, |
-                                        __/ | TURBO v4.0
+                                        __/ |
                                        |___/ 
         """ + Style.RESET_ALL)
-        print(f"{Fore.WHITE}Author: {Fore.RED}{__author__}")
+        print(f"{Fore.WHITE}Author: {Fore.RED}{__author__} {Fore.WHITE}| Version: {Fore.YELLOW}{__version__}")
         print("-" * 60)
 
 if __name__ == "__main__":
@@ -218,4 +251,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(scanner.run())
     except KeyboardInterrupt:
-        print(Fore.RED + "\n[!] Scan Aborted.")
+        # حتى لو أوقف المستخدم الفحص، نظهر الملخص
+        scanner.print_summary(0)
+        print(Fore.RED + "\n[!] Scan interrupted by user.")
