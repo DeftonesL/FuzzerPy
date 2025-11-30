@@ -15,7 +15,7 @@ from colorama import Fore, Style, init
 from tqdm.asyncio import tqdm
 
 __author__ = "Saleh Al-Otaibi"
-__version__ = "5.0.0 (Elite Display)"
+__version__ = "6.0.0 (Silent Assassin)"
 __tool_name__ = "FuzzerPy"
 
 init(autoreset=True)
@@ -51,7 +51,7 @@ class SmartGenerator:
             return "site"
 
     def generate(self):
-        print(f"{Fore.CYAN}[*] Analyzing context for: {self.target_domain}")
+        print(f"{Fore.CYAN}[*] Context Analysis: {Fore.WHITE}{self.target_domain}")
         wordlist = set()
         
         wordlist.update(self.cores)
@@ -74,22 +74,24 @@ class SmartGenerator:
         random.shuffle(final_list)
         
         if self.limit and self.limit > 0:
-            print(f"{Fore.YELLOW}[*] Limiting wordlist to {self.limit:,} items.")
             final_list = final_list[:self.limit]
             
         return final_list
 
 class FuzzerPyEngine:
-    def __init__(self, target, wordlist_data, extensions, threads, output_file=None):
+    def __init__(self, target, wordlist_data, extensions, threads, verbose=False, output_file=None):
         self.target = target.rstrip('/')
         self.wordlist_data = wordlist_data
         self.extensions = extensions
         self.semaphore = asyncio.Semaphore(threads)
+        self.verbose = verbose
         self.output_file = output_file
         self.found_urls = []
-        self.stats = {200: 0, 403: 0, 301: 0, 302: 0, 'other': 0}
-        self.total_scanned = 0
-        self.timeout_settings = aiohttp.ClientTimeout(total=5, sock_connect=3)
+        self.stats = {'total': 0, 200: 0, 403: 0, 302: 0, 'errors': 0}
+        
+        # إعدادات مهلة الاتصال وإعادة المحاولة
+        self.timeout = aiohttp.ClientTimeout(total=5, sock_connect=3)
+        self.max_retries = 2
         
         if __author__ != "Saleh Al-Otaibi":
             sys.exit("Integrity Error.")
@@ -97,96 +99,90 @@ class FuzzerPyEngine:
     def get_random_agent(self):
         return random.choice(USER_AGENTS)
 
-    def save_result(self, line):
+    def log_result(self, msg, pbar=None):
+        """طباعة ذكية تعتمد على الوضع المختار"""
+        if self.verbose and pbar:
+            tqdm.write(msg)
+        else:
+            # في الوضع الصامت، نطبع النتائج فقط فوراً
+            print(msg)
+
+    def save_file(self, line):
         if self.output_file:
             with open(self.output_file, 'a') as f:
                 f.write(line + '\n')
 
-    async def scan_url(self, session, path, pbar):
+    async def scan_url(self, session, path, pbar=None):
         url = f"{self.target}/{path}"
         headers = {'User-Agent': self.get_random_agent()}
         
         async with self.semaphore:
-            try:
-                async with session.get(url, headers=headers, allow_redirects=False, timeout=self.timeout_settings) as response:
-                    status = response.status
-                    self.total_scanned += 1
-                    
-                    # Result Formatting
-                    msg = ""
-                    if status == 200:
-                        msg = f"{Fore.GREEN}[✔] 200 OK      | {url}{Style.RESET_ALL}"
-                        self.stats[200] += 1
-                    elif status == 403:
-                        msg = f"{Fore.YELLOW}[!] 403 Forbidden | {url}{Style.RESET_ALL}"
-                        self.stats[403] += 1
-                    elif status in [301, 302]:
-                        loc = response.headers.get('Location', 'Unknown')
-                        msg = f"{Fore.BLUE}[➜] {status} Redirect| {url} -> {loc}{Style.RESET_ALL}"
-                        self.stats[status] += 1
-                    else:
-                         # We don't print other codes to keep it simple, but track them
-                         pass
-
-                    if msg:
-                        # Print CLEANLY above the progress bar
-                        tqdm.write(msg)
-                        self.found_urls.append(url)
-                        self.save_result(f"[{status}] {url}")
+            for attempt in range(self.max_retries + 1):
+                try:
+                    async with session.get(url, headers=headers, allow_redirects=False, timeout=self.timeout) as response:
+                        status = response.status
+                        self.stats['total'] += 1
                         
-                        # Update the live counter on the bar
-                        pbar.set_postfix({'Found': f"{len(self.found_urls)}"}, refresh=True)
+                        msg = ""
+                        if status == 200:
+                            msg = f"{Fore.GREEN}[200] Found: {url}{Style.RESET_ALL}"
+                            self.stats[200] += 1
+                        elif status == 403:
+                            msg = f"{Fore.YELLOW}[403] Forbidden: {url}{Style.RESET_ALL}"
+                            self.stats[403] += 1
+                        elif status in [301, 302]:
+                            loc = response.headers.get('Location', 'Unknown')
+                            msg = f"{Fore.BLUE}[{status}] Redir: {url} -> {loc}{Style.RESET_ALL}"
+                            self.stats[302] += 1
+                        
+                        if msg:
+                            self.found_urls.append(url)
+                            self.log_result(msg, pbar)
+                            self.save_file(f"[{status}] {url}")
+                            
+                            # تحديث العداد الحي في الوضع المرئي
+                            if pbar and self.verbose:
+                                pbar.set_postfix({'Found': len(self.found_urls)}, refresh=False)
+                        
+                        break # نجح الاتصال، اخرج من حلقة المحاولة
 
-            except Exception:
-                pass
-            finally:
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    if attempt == self.max_retries:
+                        self.stats['errors'] += 1
+                except Exception:
+                    break
+            
+            # تحديث الشريط فقط إذا كان موجوداً
+            if pbar:
                 pbar.update(1)
-
-    def print_summary(self, duration):
-        total_found = len(self.found_urls)
-        not_found = self.total_scanned - total_found
-        
-        print("\n" + Fore.WHITE + "=" * 50)
-        print(f"{Fore.CYAN}           SCAN REPORT SUMMARY")
-        print(Fore.WHITE + "=" * 50)
-        print(f"{Fore.WHITE} Time Taken   : {Fore.YELLOW}{duration:.2f} sec")
-        print(f"{Fore.WHITE} Total Scanned: {Fore.CYAN}{self.total_scanned:,}")
-        print(f"{Fore.WHITE} Not Found    : {Fore.RED}{not_found:,}")
-        print(f"{Fore.WHITE} Total Found  : {Fore.GREEN}{total_found:,}")
-        print(Fore.WHITE + "-" * 50)
-        print(f"{Fore.GREEN} [200] OK      : {self.stats[200]}")
-        print(f"{Fore.BLUE} [3xx] Redirect: {self.stats[301] + self.stats[302]}")
-        print(f"{Fore.YELLOW} [403] Forbidden: {self.stats[403]}")
-        print(Fore.WHITE + "=" * 50)
-        if self.output_file:
-            print(f"{Fore.WHITE} Results saved to: {Fore.MAGENTA}{self.output_file}")
-        print(f"{Fore.WHITE} Tool by: {Fore.RED}{__author__}")
 
     async def run(self):
         self.print_banner()
         
+        # تجهيز البيانات
         final_payloads = []
-        print(f"{Fore.CYAN}[*] Preparing payloads...")
-        
         for word in self.wordlist_data:
             final_payloads.append(word)
             for ext in self.extensions:
                 final_payloads.append(f"{word}.{ext}")
-
-        total = len(final_payloads)
-        print(f"{Fore.WHITE}[*] Target: {Fore.GREEN}{self.target}")
-        print(f"{Fore.WHITE}[*] Speed: {Fore.GREEN}{self.semaphore._value} Threads")
-        print("-" * 60)
         
+        total_reqs = len(final_payloads)
+        
+        print(f"{Fore.WHITE}[*] Target: {Fore.GREEN}{self.target}")
+        print(f"{Fore.WHITE}[*] Payloads: {Fore.GREEN}{total_reqs:,}")
+        if not self.verbose:
+            print(f"{Fore.YELLOW}[*] Silent Mode Active (Only hits will be shown)...")
+        print("-" * 60)
+
         connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300, ssl=False)
         start_time = time.time()
-        
-        # Cleaner Bar Format
-        bar_fmt = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] {postfix}"
-        
+
         async with aiohttp.ClientSession(connector=connector) as session:
-            with tqdm(total=total, desc=f"{Fore.CYAN}Scanning", unit="req", ncols=95, 
-                      bar_format=bar_fmt, postfix={'Found': '0'}) as pbar:
+            # إذا فعل الفيربوس نظهر الشريط، وإلا نجعله "مخفي"
+            # disable=True تجعل الشريط يعمل في الخلفية لكن لا يظهر على الشاشة
+            with tqdm(total=total_reqs, disable=not self.verbose, 
+                      desc="Scanning", unit="req", ncols=90, 
+                      bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} {postfix}") as pbar:
                 
                 tasks = []
                 for path in final_payloads:
@@ -195,30 +191,38 @@ class FuzzerPyEngine:
                 await asyncio.gather(*tasks)
 
         duration = time.time() - start_time
-        self.print_summary(duration)
+        self.print_summary(duration, total_reqs)
+
+    def print_summary(self, duration, total_planned):
+        print("\n" + Fore.WHITE + "=" * 60)
+        print(f"{Fore.CYAN}SCAN SUMMARY | {Fore.WHITE}Time: {duration:.2f}s")
+        print(f"{Fore.WHITE}Scanned: {self.stats['total']:,}/{total_planned:,} | {Fore.RED}Errors: {self.stats['errors']}")
+        print(f"{Fore.GREEN}Found (200): {self.stats[200]} | {Fore.YELLOW}Forbidden (403): {self.stats[403]} | {Fore.BLUE}Redir: {self.stats[302]}")
+        print(Fore.WHITE + "=" * 60)
 
     def print_banner(self):
-        print(Fore.RED + r"""
-  ______                         _____       
- |  ____|                       |  __ \      
- | |__ _   _ _____________ _ __ | |__) |   _ 
- |  __| | | |_  /_  /_  / | '__||  ___/ | | |
- | |  | |_| |/ / / / / /| | |   | |   | |_| |
- |_|   \__,_/___/___/___|_|_|   |_|    \__, |
-                                        __/ |
-                                       |___/ 
+        print(Fore.RED + rf"""
+   __                            
+  / _|dX_b  FuzzerPy {__version__}          
+ | |_ _  _ ___________ _ _ __ _  _ 
+ |  _| || |_ /_ / -_) '_| '_ \ || |
+ |_|  \_,_/__/__\___|_| | .__/\_, |
+                        |_|   |__/ 
         """ + Style.RESET_ALL)
-        print(f"{Fore.WHITE}Author: {Fore.RED}{__author__} {Fore.WHITE}| Version: {Fore.YELLOW}{__version__}")
+        print(f"{Fore.WHITE}Author: {__author__}")
         print("-" * 60)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=f"{__tool_name__}")
+    parser = argparse.ArgumentParser(description=f"{__tool_name__} - Intelligent Scanner")
     parser.add_argument("-u", "--url", required=True, help="Target URL")
     
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-w", "--wordlist", help="Path to external wordlist")
-    group.add_argument("--generate", action="store_true", help="Enable Intelligent Generator")
+    group.add_argument("-w", "--wordlist", help="Path to wordlist file")
+    group.add_argument("--generate", action="store_true", help="Auto-generate wordlist")
     
+    # الخيار الجديد الذي طلبته
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show progress bar (Hidden by default)")
+
     parser.add_argument("-l", "--limit", type=int, help="Limit generated words")
     parser.add_argument("-e", "--extensions", help="Extensions (e.g. php,html)")
     parser.add_argument("-t", "--threads", type=int, default=50, help="Threads count")
@@ -227,6 +231,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     exts = args.extensions.split(',') if args.extensions else []
     
+    # منطق الكلمات
     words_data = []
     if args.generate:
         gen = SmartGenerator(args.url, limit=args.limit)
@@ -243,7 +248,8 @@ if __name__ == "__main__":
         except:
             sys.exit(f"{Fore.RED}[!] File not found.")
 
-    scanner = FuzzerPyEngine(args.url, words_data, exts, args.threads, args.output)
+    # تشغيل المحرك مع خيار الفيربوس
+    scanner = FuzzerPyEngine(args.url, words_data, exts, args.threads, args.verbose, args.output)
     
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -251,6 +257,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(scanner.run())
     except KeyboardInterrupt:
-        # حتى لو أوقف المستخدم الفحص، نظهر الملخص
-        scanner.print_summary(0)
-        print(Fore.RED + "\n[!] Scan interrupted by user.")
+        # حتى عند الإيقاف نظهر الملخص
+        print(Fore.RED + "\n[!] Interrupted.")
+        scanner.print_summary(0, 0)
